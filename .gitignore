@@ -17,6 +17,9 @@ local.properties
 .env
 debug.keystore
 
+# Allow Gradle wrapper jar
+!gradle/wrapper/gradle-wrapper.jar
+
 # Native C/C++ & FFmpeg binaries (Keep Git repo lightweight, never commit .so files)
 **/*.so
 **/jniLibs/**/*.so

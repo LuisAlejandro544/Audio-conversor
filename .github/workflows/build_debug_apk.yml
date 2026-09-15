@@ -76,9 +76,24 @@ jobs:
           ./generate_debug_keystore.sh ./debug.keystore
           ls -lh ./debug.keystore
 
-      # 6. Preparar permisos del wrapper de Gradle
-      - name: Conceder permisos de ejecución a gradlew
-        run: chmod +x ./gradlew
+      # 6. Preparar permisos y garantizar presencia de gradle-wrapper.jar
+      - name: Preparar y verificar Gradle Wrapper
+        run: |
+          chmod +x ./gradlew
+          if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
+            echo "⚠️ gradle-wrapper.jar no encontrado. Descargando distribución oficial de Gradle para generarlo..."
+            mkdir -p gradle/wrapper
+            DIST_URL=$(grep 'distributionUrl' gradle/wrapper/gradle-wrapper.properties | cut -d'=' -f2 | tr -d '\\')
+            echo "Descargando desde: $DIST_URL"
+            curl -sSL "$DIST_URL" -o /tmp/gradle-dist.zip
+            unzip -q /tmp/gradle-dist.zip -d /tmp/gradle-dist
+            GRADLE_BIN=$(find /tmp/gradle-dist -name "gradle" -type f -executable | head -n 1)
+            echo "Ejecutando $GRADLE_BIN wrapper..."
+            "$GRADLE_BIN" wrapper
+            rm -rf /tmp/gradle-dist.zip /tmp/gradle-dist
+          fi
+          echo "✅ gradle-wrapper.jar verificado correctamente:"
+          ls -lh gradle/wrapper/gradle-wrapper.jar
 
       # 7. Compilar APK Debug (SIN CACHÉ, desde 0, sin requerir archivo .env)
       - name: Compilar APK Debug con Gradle (Sin Caché)
