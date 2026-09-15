@@ -1,4 +1,4 @@
-name: Build Debug APK (FFmpeg C++20)
+name: Build Debug APK (FFmpeg C++23)
 
 on:
   push:
@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   build-debug-apk:
-    name: Compilar APK Debug con FFmpeg y C++20
+    name: Compilar APK Debug con FFmpeg y C++23
     runs-on: ubuntu-latest
 
     steps:
@@ -24,7 +24,7 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      # 2. Instalación de herramientas de C++20 y cabeceras de FFmpeg en el sistema
+      # 2. Instalación de herramientas de C++23 y cabeceras de FFmpeg en el sistema
       - name: Instalar dependencias de C++, CMake, Ninja y FFmpeg
         run: |
           sudo apt-get update
@@ -38,7 +38,7 @@ jobs:
             libavformat-dev \
             libavutil-dev \
             libswresample-dev
-          echo "Dependencias de C++ y FFmpeg instaladas correctamente."
+          echo "Dependencias de C++23 y FFmpeg instaladas correctamente."
 
       # 3. Configurar Java JDK 17 (Estándar compatible con AGP 9+ y Gradle 9.3+) SIN CACHÉ
       - name: Configurar Java JDK 17 (Sin Caché)
@@ -49,16 +49,25 @@ jobs:
           # Sin caché de Gradle para garantizar compilación 100% limpia y reproducible
           cache: ''
 
-      # 4. Configurar Android SDK, NDK y CMake
-      - name: Configurar Android SDK, NDK y CMake
-        uses: android-actions/setup-android@v3
-
-      - name: Instalar NDK y CMake para Android
+      # 4. Configurar Android NDK y CMake usando directamente el sdkmanager oficial del runner
+      - name: Instalar Android NDK y CMake oficial
         run: |
+          echo "Buscando sdkmanager en ANDROID_HOME: $ANDROID_HOME"
+          SDKM=""
+          if [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          elif [ -x "$ANDROID_HOME/cmdline-tools/16.0/bin/sdkmanager" ]; then
+            SDKM="$ANDROID_HOME/cmdline-tools/16.0/bin/sdkmanager"
+          else
+            SDKM=$(which sdkmanager 2>/dev/null || find "$ANDROID_HOME/cmdline-tools" -name "sdkmanager" -type f 2>/dev/null | head -n 1)
+          fi
+          echo "sdkmanager seleccionado: $SDKM"
           echo "Aceptando licencias del Android SDK..."
-          yes | sdkmanager --licenses || true
+          yes | "$SDKM" --licenses || true
           echo "Instalando NDK 26.1.10909125 y CMake 3.22.1..."
-          sdkmanager "ndk;26.1.10909125" "cmake;3.22.1"
+          "$SDKM" "ndk;26.1.10909125" "cmake;3.22.1"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/26.1.10909125" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> $GITHUB_ENV
 
       # 5. Generar OBLIGATORIAMENTE desde CERO la firma debug sin esperar
       - name: Generar firma debug (debug.keystore) desde 0 sin esperar
@@ -71,7 +80,7 @@ jobs:
       - name: Conceder permisos de ejecución a gradlew
         run: chmod +x ./gradlew
 
-      # 7. Compilar APK Debug (SIN CACHÉ, desde 0)
+      # 7. Compilar APK Debug (SIN CACHÉ, desde 0, sin requerir archivo .env)
       - name: Compilar APK Debug con Gradle (Sin Caché)
         run: |
           ./gradlew assembleDebug \
