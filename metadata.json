@@ -1,0 +1,6 @@
+{
+  "name": "AudioStudio",
+  "description": "Conversor de audio versátil y potente. Convierte entre formatos (M4A, WAV, FLAC, OGG), ajusta bitrate, frecuencia de muestreo, canales y volumen.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
