@@ -149,9 +149,14 @@ fun ConvertConfigScreen(
             )
 
             // 3. Reducción de Bitrate / Bireraje (solo para formatos comprimibles)
+            val maxAllowedBitrate = viewModel.getMaxAllowedBitrate()
+            val maxAllowedChannels = viewModel.getMaxAllowedChannels()
+            val maxAllowedSampleRate = viewModel.getMaxAllowedSampleRate()
+
             if (!selectedFormat.isLossless) {
                 BitrateConfigSection(
                     currentBitrate = selectedBitrate,
+                    maxAllowedBitrate = maxAllowedBitrate,
                     onBitrateChanged = { viewModel.setBitrate(it) }
                 )
             } else {
@@ -161,12 +166,14 @@ fun ConvertConfigScreen(
             // 4. Canales de Audio (Mono vs Estéreo)
             ChannelsConfigSection(
                 selectedChannels = selectedChannels,
+                maxAllowedChannels = maxAllowedChannels,
                 onChannelsChanged = { viewModel.setChannels(it) }
             )
 
             // 5. Frecuencia de Muestreo (Sample Rate Hz)
             SampleRateConfigSection(
                 selectedSampleRate = selectedSampleRate,
+                maxAllowedSampleRate = maxAllowedSampleRate,
                 onSampleRateChanged = { viewModel.setSampleRate(it) }
             )
 
@@ -348,11 +355,12 @@ private fun FormatSelectionSection(
 }
 
 /**
- * Sección para ajuste de bitrate con presets y slider.
+ * Sección para ajuste de bitrate con presets y slider acotados a la calidad original.
  */
 @Composable
 private fun BitrateConfigSection(
     currentBitrate: Int,
+    maxAllowedBitrate: Int,
     onBitrateChanged: (Int) -> Unit
 ) {
     Card(
@@ -395,7 +403,7 @@ private fun BitrateConfigSection(
             }
 
             Text(
-                text = "Bajar el bitrate reduce significativamente el tamaño del archivo con una pérdida mínima perceptible.",
+                text = "Protección de calidad activa: Máximo permitido de $maxAllowedBitrate kbps (origen). No se permite upsampling para evitar inflar el peso sin ganancia sonora real.",
                 style = MaterialTheme.typography.bodySmall.copy(color = TextSecondary),
                 modifier = Modifier.padding(top = 4.dp, bottom = 12.dp)
             )
@@ -408,18 +416,35 @@ private fun BitrateConfigSection(
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 commonBitrates.forEach { br ->
-                    val selected = currentBitrate == br
+                    val isExceeded = br > maxAllowedBitrate
+                    val selected = currentBitrate == br && !isExceeded
+                    val isClickable = !isExceeded
+
                     Surface(
                         modifier = Modifier
                             .weight(1f)
                             .clip(RoundedCornerShape(8.dp))
-                            .clickable { onBitrateChanged(br) }
+                            .then(
+                                if (isClickable) {
+                                    Modifier.clickable { onBitrateChanged(br) }
+                                } else {
+                                    Modifier
+                                }
+                            )
                             .border(
                                 1.dp,
-                                if (selected) AudioOrange else StudioCardBorder,
+                                when {
+                                    selected -> AudioOrange
+                                    isExceeded -> StudioCardBorder.copy(alpha = 0.3f)
+                                    else -> StudioCardBorder
+                                },
                                 RoundedCornerShape(8.dp)
                             ),
-                        color = if (selected) AudioOrange.copy(alpha = 0.2f) else StudioBackground,
+                        color = when {
+                            selected -> AudioOrange.copy(alpha = 0.2f)
+                            isExceeded -> StudioBackground.copy(alpha = 0.4f)
+                            else -> StudioBackground
+                        },
                         shape = RoundedCornerShape(8.dp)
                     ) {
                         Column(
@@ -427,10 +452,15 @@ private fun BitrateConfigSection(
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             Text(
-                                text = "$br",
+                                text = if (isExceeded) "$br 🔒" else "$br",
                                 style = MaterialTheme.typography.bodySmall.copy(
                                     fontWeight = FontWeight.Bold,
-                                    color = if (selected) AudioOrange else TextPrimary
+                                    color = when {
+                                        selected -> AudioOrange
+                                        isExceeded -> TextMuted.copy(alpha = 0.35f)
+                                        else -> TextPrimary
+                                    },
+                                    fontSize = if (isExceeded) 10.sp else 12.sp
                                 )
                             )
                         }
@@ -440,11 +470,17 @@ private fun BitrateConfigSection(
 
             Spacer(modifier = Modifier.height(14.dp))
 
+            // Rango de slider limitado por la tasa de bits del archivo original
+            val sliderMin = 64f.coerceAtMost(maxAllowedBitrate.toFloat())
+            val sliderMax = maxAllowedBitrate.toFloat().coerceAtLeast(sliderMin)
+
             Slider(
-                value = currentBitrate.toFloat(),
-                onValueChange = { onBitrateChanged(it.toInt()) },
-                valueRange = 64f..320f,
-                steps = 7,
+                value = currentBitrate.toFloat().coerceIn(sliderMin, sliderMax),
+                onValueChange = { onBitrateChanged(it.toInt().coerceAtMost(maxAllowedBitrate)) },
+                valueRange = sliderMin..sliderMax,
+                steps = if (sliderMax > sliderMin) {
+                    ((sliderMax - sliderMin) / 32f).toInt().coerceAtLeast(0)
+                } else 0,
                 modifier = Modifier
                     .fillMaxWidth()
                     .testTag("bitrate_slider"),
@@ -459,8 +495,8 @@ private fun BitrateConfigSection(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Text("64 kbps (Voz/WhatsApp)", style = MaterialTheme.typography.labelSmall.copy(color = TextMuted))
-                Text("320 kbps (Máx. Fidelidad)", style = MaterialTheme.typography.labelSmall.copy(color = TextMuted))
+                Text("${sliderMin.toInt()} kbps (Mín)", style = MaterialTheme.typography.labelSmall.copy(color = TextMuted))
+                Text("Tope: $maxAllowedBitrate kbps (Original)", style = MaterialTheme.typography.labelSmall.copy(color = AudioOrange, fontWeight = FontWeight.Bold))
             }
         }
     }
@@ -505,8 +541,11 @@ private fun LosslessNotice(format: AudioFormatType) {
 @Composable
 private fun ChannelsConfigSection(
     selectedChannels: Int,
+    maxAllowedChannels: Int,
     onChannelsChanged: (Int) -> Unit
 ) {
+    val isStereoAllowed = maxAllowedChannels >= 2
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -536,13 +575,15 @@ private fun ChannelsConfigSection(
                     title = "Original",
                     subtitle = "Mantener pistas",
                     selected = selectedChannels == 0,
+                    enabled = true,
                     onClick = { onChannelsChanged(0) },
                     modifier = Modifier.weight(1f)
                 )
                 ChannelOption(
-                    title = "Estéreo",
-                    subtitle = "2 Canales (L/R)",
-                    selected = selectedChannels == 2,
+                    title = if (isStereoAllowed) "Estéreo" else "Estéreo 🔒",
+                    subtitle = if (isStereoAllowed) "2 Canales (L/R)" else "No disp. (origen Mono)",
+                    selected = selectedChannels == 2 && isStereoAllowed,
+                    enabled = isStereoAllowed,
                     onClick = { onChannelsChanged(2) },
                     modifier = Modifier.weight(1f)
                 )
@@ -550,6 +591,7 @@ private fun ChannelsConfigSection(
                     title = "Mono",
                     subtitle = "-50% espacio",
                     selected = selectedChannels == 1,
+                    enabled = true,
                     onClick = { onChannelsChanged(1) },
                     modifier = Modifier.weight(1f)
                 )
@@ -563,19 +605,34 @@ private fun ChannelOption(
     title: String,
     subtitle: String,
     selected: Boolean,
+    enabled: Boolean = true,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Surface(
         modifier = modifier
             .clip(RoundedCornerShape(10.dp))
-            .clickable { onClick() }
+            .then(
+                if (enabled) {
+                    Modifier.clickable { onClick() }
+                } else {
+                    Modifier
+                }
+            )
             .border(
                 1.dp,
-                if (selected) AudioCyan else StudioCardBorder,
+                when {
+                    selected && enabled -> AudioCyan
+                    !enabled -> StudioCardBorder.copy(alpha = 0.3f)
+                    else -> StudioCardBorder
+                },
                 RoundedCornerShape(10.dp)
             ),
-        color = if (selected) AudioCyan.copy(alpha = 0.15f) else StudioBackground,
+        color = when {
+            selected && enabled -> AudioCyan.copy(alpha = 0.15f)
+            !enabled -> StudioBackground.copy(alpha = 0.4f)
+            else -> StudioBackground
+        },
         shape = RoundedCornerShape(10.dp)
     ) {
         Column(
@@ -586,23 +643,31 @@ private fun ChannelOption(
                 text = title,
                 style = MaterialTheme.typography.bodyMedium.copy(
                     fontWeight = FontWeight.Bold,
-                    color = if (selected) AudioCyan else TextPrimary
+                    color = when {
+                        selected && enabled -> AudioCyan
+                        !enabled -> TextMuted.copy(alpha = 0.35f)
+                        else -> TextPrimary
+                    }
                 )
             )
             Text(
                 text = subtitle,
-                style = MaterialTheme.typography.labelSmall.copy(color = TextMuted)
+                style = MaterialTheme.typography.labelSmall.copy(
+                    color = if (enabled) TextMuted else TextMuted.copy(alpha = 0.35f),
+                    fontSize = 9.sp
+                )
             )
         }
     }
 }
 
 /**
- * Frecuencia de muestreo (Hz).
+ * Frecuencia de muestreo (Hz) con protección contra upsampling destructivo.
  */
 @Composable
 private fun SampleRateConfigSection(
     selectedSampleRate: Int,
+    maxAllowedSampleRate: Int,
     onSampleRateChanged: (Int) -> Unit
 ) {
     Card(
@@ -624,7 +689,11 @@ private fun SampleRateConfigSection(
                     color = TextPrimary
                 )
             )
-            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                text = "Tope de fidelidad: ${String.format(Locale.US, "%.1f", maxAllowedSampleRate / 1000f)} kHz (frecuencia nativa). No se permite upsampling artificial.",
+                style = MaterialTheme.typography.bodySmall.copy(color = TextSecondary),
+                modifier = Modifier.padding(top = 4.dp, bottom = 10.dp)
+            )
 
             val rates = listOf(
                 0 to "Original",
@@ -639,18 +708,35 @@ private fun SampleRateConfigSection(
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 rates.forEach { (rate, label) ->
-                    val selected = selectedSampleRate == rate
+                    val isExceeded = rate > 0 && rate > maxAllowedSampleRate
+                    val selected = selectedSampleRate == rate && !isExceeded
+                    val isClickable = !isExceeded
+
                     Surface(
                         modifier = Modifier
                             .weight(1f)
                             .clip(RoundedCornerShape(8.dp))
-                            .clickable { onSampleRateChanged(rate) }
+                            .then(
+                                if (isClickable) {
+                                    Modifier.clickable { onSampleRateChanged(rate) }
+                                } else {
+                                    Modifier
+                                }
+                            )
                             .border(
                                 1.dp,
-                                if (selected) AudioGreen else StudioCardBorder,
+                                when {
+                                    selected -> AudioGreen
+                                    isExceeded -> StudioCardBorder.copy(alpha = 0.3f)
+                                    else -> StudioCardBorder
+                                },
                                 RoundedCornerShape(8.dp)
                             ),
-                        color = if (selected) AudioGreen.copy(alpha = 0.15f) else StudioBackground,
+                        color = when {
+                            selected -> AudioGreen.copy(alpha = 0.15f)
+                            isExceeded -> StudioBackground.copy(alpha = 0.4f)
+                            else -> StudioBackground
+                        },
                         shape = RoundedCornerShape(8.dp)
                     ) {
                         Box(
@@ -660,11 +746,15 @@ private fun SampleRateConfigSection(
                                 .padding(vertical = 10.dp)
                         ) {
                             Text(
-                                text = label,
+                                text = if (isExceeded) "$label 🔒" else label,
                                 style = MaterialTheme.typography.labelSmall.copy(
                                     fontWeight = FontWeight.SemiBold,
-                                    color = if (selected) AudioGreen else TextSecondary,
-                                    fontSize = 10.sp
+                                    color = when {
+                                        selected -> AudioGreen
+                                        isExceeded -> TextMuted.copy(alpha = 0.35f)
+                                        else -> TextSecondary
+                                    },
+                                    fontSize = if (isExceeded) 9.sp else 10.sp
                                 )
                             )
                         }

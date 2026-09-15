@@ -30,6 +30,11 @@
 - **Automatización CI con GitHub Actions & Firma Debug (Completado ✅)**:
   - Workflow `.github/workflows/build_debug_apk.yml` configurado con Gradle y NDK sin caché.
   - Script `generate_debug_keystore.sh` para forzar la creación desde cero de `debug.keystore` de forma no interactiva.
+- **Protección Dinámica de Calidad y Techo Técnico (Completado ✅)**:
+  - Validación en tiempo real de los límites nativos del archivo fuente (bitrate, frecuencia de muestreo y canales).
+  - Bloqueo de opciones superiores a las nativas en la pantalla de configuración (`ConvertConfigScreen`) con candados visuales `🔒` y deslizador acotado.
+  - Supresión de falso estéreo en archivos Mono de 1 canal.
+  - Clamping estricto en `ConverterViewModel` para asegurar que el estado y la transcodificación nunca intenten upsampling destructivo.
 
 ## 📍 Fase 4: Filtros DSP Avanzados y Edición de Audio (Siguiente Fase 🚀)
 - Ecualizador paramétrico nativo de 5 bandas en C++20 con FFmpeg.

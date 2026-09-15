@@ -36,11 +36,11 @@
 
 ### 🎨 Capa de Presentación Jetpack Compose (`app/src/main/java/com/example/ui/`)
 - `MainActivity.kt`: Punto de entrada con `enableEdgeToEdge()` y controlador de navegación.
-- `ConverterViewModel.kt`: ViewModel centralizado con StateFlow para el flujo de conversión.
+- `ConverterViewModel.kt`: ViewModel centralizado con StateFlow para el flujo de conversión, incluyendo lógica de clamping y techo técnico de fidelidad (`getMaxAllowedBitrate`, `getMaxAllowedChannels`, `getMaxAllowedSampleRate`).
 - `screens/`:
   - `home/HomeScreen.kt`: Pantalla principal inspirada en AudioLab, con carrusel de herramientas recientes, cuadrícula de herramientas con candados explicativos para funciones en desarrollo y barra inferior de navegación.
   - `select/SelectAudioScreen.kt`: Selector de audio local conectado al almacenamiento del dispositivo móvil (100% audios reales).
-  - `config/ConvertConfigScreen.kt`: Configuración granular de códec, bitrate (64k-320k), canales, frecuencia y ganancia.
+  - `config/ConvertConfigScreen.kt`: Configuración granular de códec, bitrate (64k-320k), canales, frecuencia y ganancia, con candados visuales inteligentes (`🔒`) y restricción dinámica de rango para no superar los parámetros del archivo original.
   - `progress/ConvertProgressScreen.kt`: Barra de progreso en tiempo real con mensajes nativos de FFmpeg y cancelación.
   - `result/ConvertResultScreen.kt`: Pantalla de éxito con reproductor integrado y opciones para compartir.
   - `history/HistoryScreen.kt`: Historial completo con estadísticas y reproductor individual por elemento.

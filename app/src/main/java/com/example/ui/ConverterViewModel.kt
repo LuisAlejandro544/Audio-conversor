@@ -91,6 +91,7 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
 
     /**
      * Carga y procesa un archivo de audio seleccionado por el usuario vía Uri.
+     * Aplica protección de fidelidad técnica para no superar los valores soportados por el audio original.
      */
     fun selectAudio(uri: Uri) {
         viewModelScope.launch(Dispatchers.IO) {
@@ -100,32 +101,96 @@ class ConverterViewModel(application: Application) : AndroidViewModel(applicatio
                 _selectedAudio.value = info
                 val baseName = info.fileName.substringBeforeLast('.')
                 _customFileName.value = "${baseName}_convertido"
-                // Ajustar bitrate sugerido a un valor razonable
-                _selectedBitrateKbps.value = if (info.bitrateKbps in 64..320) info.bitrateKbps else 128
+                
+                // Techo técnico: el bitrate inicial no puede superar el del audio original
+                val maxAllowedBr = if (info.bitrateKbps > 0) info.bitrateKbps else 320
+                val defaultTargetBr = if (info.bitrateKbps in 64..320) info.bitrateKbps else 128
+                _selectedBitrateKbps.value = defaultTargetBr.coerceAtMost(maxAllowedBr)
+
+                // Si el audio es Mono (1 canal), no permitir estéreo forzado
+                if (info.channelCount == 1 && _selectedChannels.value == 2) {
+                    _selectedChannels.value = 1
+                }
+
+                // Si la frecuencia de muestreo seleccionada excede la original, restablecer a Original (0)
+                if (info.sampleRateHz > 0 && _selectedSampleRateHz.value > info.sampleRateHz) {
+                    _selectedSampleRateHz.value = 0
+                }
             } else {
                 _errorMessage.value = "No se pudieron leer los metadatos del archivo de audio."
             }
         }
     }
 
+    /**
+     * Obtiene la tasa de bits máxima permitida para el archivo actual.
+     * Evita el upsampling artificial e incremento innecesario del tamaño del archivo.
+     */
+    fun getMaxAllowedBitrate(): Int {
+        val source = _selectedAudio.value
+        return if (source != null && source.bitrateKbps > 0) {
+            source.bitrateKbps
+        } else {
+            320
+        }
+    }
+
+    /**
+     * Obtiene la frecuencia de muestreo máxima permitida para el archivo actual.
+     */
+    fun getMaxAllowedSampleRate(): Int {
+        val source = _selectedAudio.value
+        return if (source != null && source.sampleRateHz > 0) {
+            source.sampleRateHz
+        } else {
+            48000
+        }
+    }
+
+    /**
+     * Obtiene el número máximo de canales permitido para el archivo actual.
+     * Si la fuente es mono (1 canal), no se permite duplicar a falso estéreo.
+     */
+    fun getMaxAllowedChannels(): Int {
+        val source = _selectedAudio.value
+        return if (source != null && source.channelCount > 0) {
+            source.channelCount
+        } else {
+            2
+        }
+    }
+
     fun setFormat(format: AudioFormatType) {
         _selectedFormat.value = format
+        val maxAllowed = getMaxAllowedBitrate()
         if (format == AudioFormatType.WAV || format == AudioFormatType.FLAC) {
             _selectedBitrateKbps.value = format.defaultBitrateKbps
-        } else if (_selectedBitrateKbps.value > 320 || _selectedBitrateKbps.value < 64) {
-            _selectedBitrateKbps.value = 128
+        } else {
+            val candidate = if (_selectedBitrateKbps.value in 64..320) _selectedBitrateKbps.value else 128
+            _selectedBitrateKbps.value = candidate.coerceAtMost(maxAllowed)
         }
     }
 
     fun setBitrate(bitrateKbps: Int) {
-        _selectedBitrateKbps.value = bitrateKbps
+        val maxAllowed = getMaxAllowedBitrate()
+        _selectedBitrateKbps.value = bitrateKbps.coerceAtMost(maxAllowed)
     }
 
     fun setSampleRate(sampleRateHz: Int) {
+        val maxAllowed = getMaxAllowedSampleRate()
+        if (sampleRateHz > 0 && sampleRateHz > maxAllowed) {
+            // Protección: no permitir frecuencias superiores a la nativa
+            return
+        }
         _selectedSampleRateHz.value = sampleRateHz
     }
 
     fun setChannels(channels: Int) {
+        val maxAllowed = getMaxAllowedChannels()
+        if (channels > maxAllowed) {
+            // Protección: no permitir estéreo ficticio si la pista original es mono
+            return
+        }
         _selectedChannels.value = channels
     }
 

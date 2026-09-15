@@ -33,7 +33,10 @@ data class ConversionResult(
     val bitrateKbps: Int,
     val sampleRateHz: Int,
     val channelCount: Int
-)
+) {
+    val outputUri: Uri
+        get() = Uri.fromFile(outputFile)
+}
 
 /**
  * Motor central de conversión de audio 100% basado en FFmpeg nativo (libav*).
@@ -60,7 +63,13 @@ class AudioConverterEngine(private val context: Context) {
     }
 
     /**
-     * Ejecuta la conversión de audio al 100% con FFmpeg nativo en segundo plano.
+     * Ejecuta la conversión de audio preservando el 100% de la duración original y fidelidad sonora.
+     *
+     * Flujo modular:
+     * 1. Decodificación universal: MediaExtractor + MediaCodec extraen PCM 16-bit real sin truncamientos.
+     * 2. Motor nativo C++23: Procesamiento de frecuencias (libswresample), canales y ganancia con limitador suave.
+     * 3. Codificación estándar: Generación de contenedores M4A (AAC), WAV, FLAC con metadatos precisos.
+     * 4. Exportación pública: Almacenamiento directo en ConvertX/Converter y actualización de MediaStore.
      *
      * @param config Parámetros elegidos por el usuario (formato, bitrate, frecuencia, etc.)
      * @param onProgress Callback (progreso de 0 a 100, mensaje de estado)
@@ -70,124 +79,181 @@ class AudioConverterEngine(private val context: Context) {
         onProgress: (percent: Int, statusMessage: String) -> Unit
     ): ConversionResult = withContext(Dispatchers.IO) {
         isCancelled = false
-        onProgress(5, "Inicializando motor de conversión 100% FFmpeg...")
+        onProgress(5, "Inicializando motor de conversión de alta fidelidad...")
 
-        // 1. Obtener o crear archivo fuente local legible por fopen de FFmpeg
-        var tempInputFile: File? = null
-        val sourcePath: String = try {
-            if (config.sourceUri.scheme == "file") {
-                config.sourceUri.path ?: throw IllegalArgumentException("Ruta local vacía")
+        var tempPcmFile: File? = null
+        var processedPcmFile: File? = null
+        val workDir = File(context.cacheDir, "converter_work").apply { mkdirs() }
+
+        try {
+            // 1. Decodificar el archivo origen a PCM crudo de 16 bits sin pérdida ni cortes
+            onProgress(10, "Analizando y decodificando audio origen...")
+            val pcmDecoded = File.createTempFile("decoded_", ".pcm", workDir)
+            tempPcmFile = pcmDecoded
+
+            val decodedAudio = AudioDecoder.decodeToPcm(
+                context = context,
+                sourceUri = config.sourceUri,
+                outputPcmFile = pcmDecoded,
+                isCancelled = { isCancelled },
+                onProgress = onProgress
+            )
+
+            if (isCancelled) {
+                throw InterruptedException("Conversión cancelada por el usuario.")
+            }
+
+            // 2. Determinar parámetros técnicos resultantes
+            val targetSampleRate = if (config.targetSampleRateHz > 0) {
+                config.targetSampleRateHz
             } else {
-                onProgress(10, "Copiando archivo fuente para análisis nativo...")
-                val tempFile = File.createTempFile("ffmpeg_src_", ".audio", context.cacheDir)
-                tempInputFile = tempFile
-                context.contentResolver.openInputStream(config.sourceUri)?.use { input ->
-                    FileOutputStream(tempFile).use { output ->
-                        input.copyTo(output)
+                decodedAudio.sampleRate
+            }
+
+            val targetChannels = if (config.targetChannels > 0) {
+                config.targetChannels
+            } else {
+                decodedAudio.channelCount
+            }
+
+            val volumeGain = config.volumeGainFactor
+
+            val needsNativeProcessing = targetSampleRate != decodedAudio.sampleRate ||
+                    targetChannels != decodedAudio.channelCount ||
+                    kotlin.math.abs(volumeGain - 1.0f) > 0.01f
+
+            val pcmToEncode: File = if (needsNativeProcessing && NativeAudioEngine.isAvailable()) {
+                onProgress(42, "Procesando en C++23 con libswresample y control de ganancia...")
+                val pcmProcessed = File.createTempFile("processed_", ".pcm", workDir)
+                processedPcmFile = pcmProcessed
+
+                val inChannelBytes = decodedAudio.channelCount * 2
+                val chunkSize = 32768 - (32768 % inChannelBytes)
+                val buffer = ByteArray(chunkSize)
+                var bytesRead: Int
+                val fis = java.io.FileInputStream(pcmDecoded)
+                val fos = java.io.FileOutputStream(pcmProcessed)
+                var processedBytes = 0L
+                val totalPcmBytes = pcmDecoded.length()
+
+                try {
+                    while (fis.read(buffer).also { bytesRead = it } != -1) {
+                        if (isCancelled) {
+                            throw InterruptedException("Conversión cancelada por el usuario.")
+                        }
+
+                        val chunkToProcess = if (bytesRead == chunkSize) buffer else buffer.copyOf(bytesRead)
+                        val processedChunk = NativeAudioEngine.processPcmAudioNative(
+                            inputPcm = chunkToProcess,
+                            sourceSampleRate = decodedAudio.sampleRate,
+                            sourceChannels = decodedAudio.channelCount,
+                            targetSampleRate = targetSampleRate,
+                            targetChannels = targetChannels,
+                            gain = volumeGain
+                        )
+                        fos.write(processedChunk)
+                        processedBytes += bytesRead
+
+                        if (totalPcmBytes > 0) {
+                            val pct = (42 + ((processedBytes.toFloat() / totalPcmBytes) * 20).toInt()).coerceIn(42, 62)
+                            onProgress(pct, "Procesando audio nativo C++23 ($pct%)...")
+                        }
                     }
-                } ?: throw IllegalStateException("No se pudo abrir el archivo fuente")
-                tempFile.absolutePath
-            }
-        } catch (e: Exception) {
-            tempInputFile?.delete()
-            throw IllegalStateException("Error preparando archivo fuente para FFmpeg: ${e.message}", e)
-        }
-
-        if (isCancelled) {
-            tempInputFile?.delete()
-            throw InterruptedException("Conversión cancelada por el usuario")
-        }
-
-        // 2. Preparar el archivo de destino con la extensión correspondiente
-        val cleanName = if (config.customOutputFileName.isNotBlank()) {
-            config.customOutputFileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
-        } else {
-            "audiostudio_${System.currentTimeMillis()}"
-        }
-
-        val targetExt = config.targetFormat.extension
-        val finalFileName = if (cleanName.endsWith(".$targetExt", ignoreCase = true)) {
-            cleanName
-        } else {
-            "$cleanName.$targetExt"
-        }
-
-        // Búfer de trabajo de transcodificación
-        val workDir = File(context.cacheDir, "ffmpeg_work").apply { mkdirs() }
-        val workingOutputFile = File(workDir, "temp_${System.currentTimeMillis()}_$finalFileName")
-        if (workingOutputFile.exists()) {
-            workingOutputFile.delete()
-        }
-
-        onProgress(15, "Iniciando pipeline nativo FFmpeg (libavformat + libavcodec)...")
-
-        // 3. Ejecutar conversión completa en C++20 / C puro con FFmpeg
-        val resultCode = NativeAudioEngine.convertAudioFile(
-            inputPath = sourcePath,
-            outputPath = workingOutputFile.absolutePath,
-            targetFormat = targetExt,
-            targetBitrateKbps = config.targetBitrateKbps,
-            targetSampleRate = config.targetSampleRateHz,
-            targetChannels = config.targetChannels,
-            volumeGain = config.volumeGainFactor,
-            onProgress = { percent, msg ->
-                if (!isCancelled) {
-                    onProgress(percent, msg)
+                    fos.flush()
+                } finally {
+                    try { fis.close() } catch (_: Exception) {}
+                    try { fos.close() } catch (_: Exception) {}
                 }
+
+                pcmProcessed
+            } else {
+                pcmDecoded
             }
-        )
 
-        // Limpiar archivo temporal de entrada
-        tempInputFile?.delete()
+            if (isCancelled) {
+                throw InterruptedException("Conversión cancelada por el usuario.")
+            }
 
-        if (isCancelled) {
-            workingOutputFile.delete()
-            throw InterruptedException("Conversión cancelada por el usuario")
+            // 3. Preparar el nombre del archivo de salida
+            val cleanName = if (config.customOutputFileName.isNotBlank()) {
+                config.customOutputFileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+            } else {
+                "audio_${System.currentTimeMillis()}"
+            }
+
+            val targetExt = config.targetFormat.extension
+            val finalFileName = if (cleanName.endsWith(".$targetExt", ignoreCase = true)) {
+                cleanName
+            } else {
+                "$cleanName.$targetExt"
+            }
+
+            val workingOutputFile = File(workDir, "work_${System.currentTimeMillis()}_$finalFileName")
+            if (workingOutputFile.exists()) {
+                workingOutputFile.delete()
+            }
+
+            // 4. Codificar el audio al formato seleccionado preservando duración completa
+            onProgress(65, "Codificando ${config.targetFormat.displayName}...")
+            AudioEncoder.encodeAudio(
+                pcmFile = pcmToEncode,
+                outputFile = workingOutputFile,
+                targetFormat = config.targetFormat,
+                sampleRate = targetSampleRate,
+                channelCount = targetChannels,
+                bitrateKbps = config.targetBitrateKbps,
+                isCancelled = { isCancelled },
+                onProgress = onProgress
+            )
+
+            if (isCancelled) {
+                workingOutputFile.delete()
+                throw InterruptedException("Conversión cancelada por el usuario.")
+            }
+
+            if (!workingOutputFile.exists() || workingOutputFile.length() == 0L) {
+                throw IllegalStateException("El archivo resultante está vacío tras la codificación.")
+            }
+
+            onProgress(95, "Exportando archivo a ConvertX/Converter...")
+
+            // 5. Exportar a la carpeta pública ConvertX/Converter
+            val publicFile = ConvertXStorageManager.exportToConvertX(
+                context = context,
+                sourceFile = workingOutputFile,
+                targetFileName = finalFileName,
+                subfolder = ConvertXStorageManager.SUBFOLDER_CONVERTER
+            )
+
+            if (workingOutputFile.absolutePath != publicFile.absolutePath) {
+                workingOutputFile.delete()
+            }
+
+            onProgress(100, "¡Conversión finalizada con éxito!")
+
+            // 6. Leer la duración real del archivo generado para el reporte final
+            val accurateInfo = AudioMetadataReader.readAudioInfo(context, Uri.fromFile(publicFile))
+            val finalDurationMs = if (accurateInfo != null && accurateInfo.durationMs > 0) {
+                accurateInfo.durationMs
+            } else if (decodedAudio.durationMs > 0) {
+                decodedAudio.durationMs
+            } else {
+                config.sourceInfo.durationMs
+            }
+
+            ConversionResult(
+                outputFile = publicFile,
+                format = config.targetFormat,
+                fileSize = publicFile.length(),
+                durationMs = finalDurationMs,
+                bitrateKbps = config.targetBitrateKbps,
+                sampleRateHz = targetSampleRate,
+                channelCount = targetChannels
+            )
+        } finally {
+            // Limpiar archivos temporales de PCM
+            try { tempPcmFile?.delete() } catch (_: Exception) {}
+            try { processedPcmFile?.delete() } catch (_: Exception) {}
         }
-
-        if (resultCode != 0 || !workingOutputFile.exists() || workingOutputFile.length() == 0L) {
-            Log.e(TAG, "Fallo en la conversión nativa FFmpeg. Código: $resultCode")
-            throw IllegalStateException("Error al transcodificar con FFmpeg (código $resultCode). Verifica los parámetros de entrada.")
-        }
-
-        onProgress(95, "Exportando a carpeta pública ConvertX/Converter...")
-
-        // Guardar y colocar en la carpeta pública ConvertX/Converter accesible por el usuario
-        val publicFile = ConvertXStorageManager.exportToConvertX(
-            context = context,
-            sourceFile = workingOutputFile,
-            targetFileName = finalFileName,
-            subfolder = ConvertXStorageManager.SUBFOLDER_CONVERTER
-        )
-
-        // Limpiar búfer de trabajo temporal
-        if (workingOutputFile.absolutePath != publicFile.absolutePath) {
-            workingOutputFile.delete()
-        }
-
-        onProgress(100, "¡Conversión finalizada! Guardado en ConvertX/Converter")
-
-        val finalDurationMs = if (config.sourceInfo.durationMs > 0) {
-            config.sourceInfo.durationMs
-        } else {
-            // Estimar duración basada en el tamaño del archivo generado y bitrate
-            val bytes = publicFile.length()
-            val bits = bytes * 8
-            val durationSec = bits.toDouble() / (config.targetBitrateKbps * 1000)
-            (durationSec * 1000).toLong()
-        }
-
-        val finalSampleRate = if (config.targetSampleRateHz > 0) config.targetSampleRateHz else config.sourceInfo.sampleRateHz
-        val finalChannels = if (config.targetChannels > 0) config.targetChannels else config.sourceInfo.channelCount
-
-        ConversionResult(
-            outputFile = publicFile,
-            format = config.targetFormat,
-            fileSize = publicFile.length(),
-            durationMs = finalDurationMs,
-            bitrateKbps = config.targetBitrateKbps,
-            sampleRateHz = finalSampleRate,
-            channelCount = finalChannels
-        )
     }
 }
